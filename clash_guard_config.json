@@ -1,0 +1,33 @@
+{
+    "ipEndpoints": [
+        { "name": "ip.sb",       "url": "https://api.ip.sb/geoip" },
+        { "name": "ipinfo",      "url": "https://ipinfo.io/json" },
+        { "name": "ipquery.io",  "url": "https://api.ipquery.io/?format=json" },
+        { "name": "ipwho.is",    "url": "https://ipwho.is/" },
+        { "name": "ippure",      "url": "https://my.ippure.com/v1/info" },
+        { "name": "fuck-claude", "url": "https://fuck-claude.vercel.app/api/check?format=json" },
+        { "name": "ipleak.net",  "url": "https://ipleak.net/json/" }
+    ],
+    "httpTimeoutSec": 12,
+    "escalateAfterCycles": 3,
+    "fraudScoreMax": 50,
+    "claudeScoreMax": 50,
+    "allowGraceMinutes": 10,
+    "cacheFreshMinutes": 30,
+    "reachableHosts": [ "api.anthropic.com:443", "claude.ai:443" ],
+    "autoFix": true,
+    "autoFixCooldownMin": 10,
+    "autoStartClash": false,
+    "apiPorts": [ 9097, 9090 ],
+    "apiSecret": "",
+    "recommendedIpSite": { "name": "fuck-claude", "url": "https://fuck-claude.vercel.app" },
+    "manualCheckSites": [
+        { "cat": "DNS泄露", "name": "dnsleaktest.com", "url": "https://dnsleaktest.com/" },
+        { "cat": "DNS泄露", "name": "browserleaks/dns", "url": "https://browserleaks.com/dns" },
+        { "cat": "DNS泄露", "name": "ipleak.net", "url": "https://ipleak.net/" },
+        { "cat": "WebRTC泄露", "name": "browserleaks/webrtc", "url": "https://browserleaks.com/webrtc" },
+        { "cat": "浏览器指纹", "name": "Cover Your Tracks (EFF)", "url": "https://coveryourtracks.eff.org/" },
+        { "cat": "路由分流", "name": "ip.net.coffee", "url": "https://ip.net.coffee/" },
+        { "cat": "Claude风险", "name": "bewild.ai", "url": "https://bewild.ai/subscribe" }
+    ]
+}
