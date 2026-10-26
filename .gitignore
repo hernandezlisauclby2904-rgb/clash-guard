@@ -1,18 +1,25 @@
-# Logs
+# Runtime and private machine state
 logs/
 *.log
 *.log.1
+*.flag
+*.cooldown
+clash_guard_state.json
+clash_guard_fix.cooldown
 
-# OS
+# Local overrides / secrets (never commit real controller secrets)
+clash_guard_config.local.json
+*.local.json
+.env
+.env.*
+
+# Build and test output
+__pycache__/
+*.py[cod]
+*.tmp
+.DS_Store
 Thumbs.db
 Desktop.ini
-.DS_Store
-
-# Editor
 .vscode/
 .idea/
 *.swp
-
-# Clash runtime artifacts
-*.flag
-cooldown

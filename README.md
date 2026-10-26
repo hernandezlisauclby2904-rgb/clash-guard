@@ -1,271 +1,169 @@
-# Clash 护卫 · 节点出口检测与 Claude 启动门控系统
+<div align="center">
 
-> **一句话**：每 10 分钟静默巡检 Clash 出口环境；**并在 Claude.exe 启动时按硬/软规则拦截**——硬规则不满足直接杀进程，软规则（IP 质量）需用户手动放行。
-> 零第三方依赖（纯 PowerShell 5.1 + Windows Runtime Toast），单文件主程序。
+# Clash Guard 2.0
+### Windows 网络环境检查与 Claude 启动守护
 
----
+**先验证环境，再启动应用。检测未知就明确标未知，不把“没查到”说成“安全”。**
 
-## 一、系统定位
+PowerShell 5.1 · Windows 10/11 · 无第三方 PowerShell 模块
 
-| 对比 | 说明 |
-|---|---|
-| 不是什么 | 不是 Clash 配置管理器、不是代理客户端、不是 VPN |
-| 是什么 | **安全护栏**——保护使用 Claude 等有封禁风险 AI 的出口环境不被污染 |
-| 核心防护 | ① 守护 TUN 模式生效 + 系统代理关闭的黄金状态 ② 拦截 IPv6 泄露真实位置 ③ 验证 TCP 直连 Claude 真实服务可达 ④ 检测出口 IP 质量（欺诈分/住宅/Claude 风险分） |
+[快速开始](#快速开始) · [功能与边界](#功能与边界) · [测试方式](#测试方式) · [安全说明](#安全说明)
 
-**风险背景**：Claude 对中国用户的账号封禁逻辑包含出口 IP 质量评分、系统代理特征、时区语言指纹等维度。一旦被识别，轻则降智（弱模型）重则封号。本系统在 AI 客户端启动前和运行中持续维护出口环境的纯净性。
+</div>
 
 ---
 
-## 二、文件清单
+## 这是什么？
 
-```
-Clash护卫_节点检测系统/
-├── README.md                    ← 本说明
-├── clash_guard.ps1              ← 主程序（850 行，单文件 PowerShell 5.1）
-├── clash_guard_config.json      ← 配置文件（端点/阈值/开关）
-├── proxy_health_check.ps1       ← 辅助检测脚本
-├── run_hidden.vbs               ← 静默启动器（所有计划任务引用）
-│
-│  ── 运行时自动生成，本包不包含 ──
-│
-├── logs/clash_guard.log         ← 运行日志
-├── logs/clash_guard_state.json  ← 状态文件（gateCache IP质量缓存）
-└── scripts/backup/              ← 历史版本备份
-```
+Clash Guard 是一个面向个人 Windows 电脑的辅助检查工具：定时核对 Clash/TUN、Windows 代理设置、IPv4/IPv6 默认/分流路由、Claude 服务 TCP 可达性，并聚合几个第三方 IP 信息接口。它可以在检测到规则不满足时提醒、在有限条件下尝试自动修复，也能在 Claude 进程创建后进行响应式检查。只有在 IPv4 路由确认由 TUN 承载、且 IPv6 路由检查未发现旁路风险后，才会访问第三方 IP 信息接口，以避免在路由未知时无意查询并暴露出口 IP。
 
----
+风险质量只有在至少两个独立风险数据源提供可用指标、至少两个 IP 来源都返回有效 IPv4 地址且结果一致时才可能标为 `PASS`；同一服务返回多个字段不能充当多个独立来源。缺少 IPv4 证据或来源不一致时显示 `UNKNOWN`。
 
-## 三、运行模式
+它**不是 VPN、不是代理客户端，也不是 Claude 官方工具**。第三方 IP 风险分只是一种参考，不代表 Anthropic 的内部风控结论，更不保证不会封号。时区、语言、账号地区、服务政策和账号行为均不由本工具判断。
 
-主程序 `clash_guard.ps1` 是单脚本，通过参数切换运行模式：
+## 2.0 主要改动
 
-| 模式 | 参数 | 触发方式 | 说明 |
-|---|---|---|---|
-| **巡检**（默认） | `-Run` | 计划任务每 10 分钟 | 检查 Clash 进程/TUN/系统代理/IPv6/IP 质量；违规自动修复（可配）+ Toast 通知 |
-| **启动门控** | `-Watch` | 计划任务登录时 | **事件驱动**监听 Claude.exe 启动（CIM WMI Event，非轮询），按硬/软规则毫秒级拦截 |
-| **手动报告** | `-Report` | 命令行 | 只读检查，输出当前出口环境完整状态 |
-| **应急放行** | `-AllowClaude` | 命令行/桌面 bat | 10 分钟内只跳过软规则（IP质量），硬规则仍强制 |
-| **紧急总放行** | `-EmergencyAllow` | 命令行/桌面 bat | 10 分钟内所有规则放行 |
-| **逃生门** | `-EmergencyLaunch` | 桌面 bat | 彻底停用守护+启动 Claude |
-| **恢复保护** | `-Start` | 命令行/桌面 bat | 重新启用守护任务 |
-| **停止拦截** | `-Stop` | 命令行 | 只停 Watch 拦截，不影响巡检 |
-| **网络保护模式** | `-Protect` | 命令行/Toast 按钮 | 只检测告警，暂停自动修复（门控拦截不受影响） |
-| **Toast 测试** | `-TestToast` | 命令行 | 验证 Toast 通道 |
+- 修复自动修复后重建违规列表时遗漏 IPv6 检查的逻辑；复检会重新核对 TUN、代理、PAC/WPAD、IPv4/IPv6 路由、IP 质量与 TCP 可达性。
+- 不再把任意 IPv6 地址都认定为公网泄露：区分公网全局 IPv6 与 ULA/链路本地地址，并检查活动默认/分流路由是否仍指向物理网卡。无法确认路由时按严格策略阻断并显示 `UNKNOWN` 原因。
+- 启动门控会用一个基础 IP 接口确认当前出口是否仍与质量缓存匹配；切换节点/IP、缓存不匹配或无法验证时触发巡检，并按 `UNKNOWN` fail-open 处理，不把旧出口的风险评分套到新出口。
+- IP 服务响应必须是可解析的 JSON，错误响应/字段缺失会标记为 `UNKNOWN`；**UNKNOWN 不等于 PASS**，也不会单独触发自动改网或硬拦截。真正检测到阈值风险才标记 `FAIL`。
+- 采用 `Win32_ProcessStartTrace` 事件订阅，不再使用 `WITHIN 1` 的实例轮询查询；Watch 事件处理在主循环里完成，避免事件 Action 独立作用域的问题。
+- Toast 协议动作增加白名单处理器；路径含空格时通过参数引用启动。协议注册每次更新到当前脚本目录，避免移动目录后沿用旧路径。
+- `-Report` 只读检查网络状态，不自动关闭代理、不启用 TUN、不注册计划任务。
+- 状态文件使用临时文件替换，降低写入中断造成 JSON 缓存损坏的概率。
+- 复合代理字符串（例如 `http=127.0.0.1:7890;https=127.0.0.1:7890`）可识别；任何外部/不明代理、PAC 或 WPAD 都不会被自动清除。
+- 附带任务安装/卸载脚本、静态回归检查、改写后的发布介绍和独立响应式产品介绍页。
 
----
+## 快速开始
 
-## 四、Claude 启动门控（核心防护）
+### 1. 准备
 
-在 Claude.exe 启动瞬间判定，不满足硬规则直接杀进程树 + Toast 阻止启动。
+1. 确认本机已安装 Clash Verge Rev / Mihomo，并按自己的网络方案配置节点。
+2. 解压整个文件夹到固定路径，例如 `D:\Tools\ClashGuard-v2`。**不要只复制主脚本**；配置与 `toast_action.vbs` 也需要同目录。
+3. 使用 Windows PowerShell 5.1（系统自带）打开此目录。
 
-### 4.1 硬规则（不满足 → 强制阻止）
-
-| # | 条件 | 检测方式 |
-|---|---|---|
-| 1 | TUN 虚拟网卡生效 | `Get-NetAdapter` Meta Tunnel / Wintun Status=Up |
-| 2 | 系统代理关闭 | 注册表 `HKCU\...\Internet Settings\ProxyEnable=0` |
-| 2.5 | 物理网卡无全局 IPv6（防泄露真实位置） | `Get-NetIPAddress -AddressFamily IPv6` |
-| 3 | **TCP 直连 api.anthropic.com:443 / claude.ai:443 可达（3秒超时）** | `Test-NetConnection` |
-
-**关键设计**：硬规则 3 **不依赖任何第三方 IP 检测站点或缓存**——直接 TCP 握手 Claude 真实服务。换节点/IP 变动后立即反映真实状态，不存在"缓存陈旧锁死 10 分钟"问题。两轮重试（隔 2 秒）防瞬时抖动误杀。
-
-### 4.2 软规则（不满足 → 阻止但可放行）
-
-| 条件 | 来源 |
-|---|---|
-| fraudScore ≤ 50 | ippure.com |
-| 住宅 IP | ippure.com `isResidential` |
-| Claude 风险分 ≤ 50 | fuck-claude.vercel.app |
-| 非机房 IP | ipquery.io `is_datacenter` |
-
-**fail-open 设计**：`gateCache` 缓存缺失/过期（>30 分钟）**不阻断启动**，只异步踢一次巡检刷新。IP 站点全挂也不影响打开 Claude。
-
-### 4.3 杀进程
-
-`taskkill /T /F` — Electron 进程树全部杀死。Mutex 单实例防多守护，Toast 30 秒去重防轰炸。
-
----
-
-## 五、自动修复
-
-巡检发现违规时**自动修复**（可配 `autoFix: true`），按安全顺序：
-
-```
-步骤 1：经 Clash 内核 API PATCH 开 TUN
-        PATCH http://127.0.0.1:9097/configs
-        body: {"tun":{"enable":true}}
-        secret 自动读 clash-verge.yaml
-
-步骤 2：TUN 就绪后，HTTPS 真实流量验证
-        curl --noproxy '*' https://www.gstatic.com/generate_204
-        （走 TUN 路径，两候选端点任一通即可）
-
-步骤 3：关闭 127.0.0.1 本地系统代理
-        只碰 ProxyEnable，外部代理绝不碰
-        广播 WinINET 刷新让 Chrome 平滑感知
-
-步骤 4：关代理后再验证 HTTPS
-        失败则自动恢复原代理状态 + WinINET 广播
-```
-
-### 5.1 安全护栏
-
-- **全局修复锁**：命名 Mutex `Global\ClashGuardFixMutex`，巡检与一键修复并发时只有一个执行
-- **10 分钟冷却**：不反复切换折腾浏览器/网络
-- **TUN 开启失败就不动代理**：只弹窗报警
-- **日志不含 API secret**：只记修复前后状态（代理 on本地/on外部/off、TUN up/down）
-- **TCP 直连两轮重试**：硬规则 3 隔 2 秒重试一轮
-
-### 5.2 守护自愈（V2.1 新增）
-
-每 10 分钟巡检顺带检查拦截守护进程——任务启用但进程不在（崩溃/被杀）则自动拉起。Mutex 保证不会重复。停止标志改为 2 分钟过期（防陈旧标志误杀新守护）。
-
----
-
-## 六、IP 质量检测端点
-
-配置文件 `clash_guard_config.json` 中的 `ipEndpoints` 数组，当前内置 7 个：
-
-| 端点 | 用途 |
-|---|---|
-| `api.ip.sb/geoip` | IP/国家/ASN 基础信息 |
-| `ipinfo.io/json` | IP/ASN/org |
-| `api.ipquery.io` | **risk_score + is_vpn/is_proxy/is_tor/is_datacenter** |
-| `ipwho.is` | 备用 |
-| `my.ippure.com/v1/info` | **fraudScore + isResidential**（住宅 IP 是 AI 服务最友好的出口） |
-| `fuck-claude.vercel.app/api/check` | **Claude 中国用户风险评分**：score + band + verdict |
-| `ipleak.net/json` | 冗余后端 |
-
-**PS5 兼容性**：部分站点 TLS 握手失败时自动降级 `curl.exe`。
-
----
-
-## 七、Toast 通知（Windows Runtime）
-
-用 `Windows.UI.Notifications.ToastNotificationManager` + ToastGeneric 模板，内嵌 PowerShell 调起：
-- 标题："Clash 护卫 · 状态"
-- 正文：IP 质量摘要（出口 IP · 欺诈分 · 住宅/Claude 风险分）
-- **带按钮**（注册 `clashguard:` 协议处理器到 `HKCU\Software\Classes\`）：
-  - 「一键修复」→ `clashguard:fix` 强制立即修复
-  - 「查IP质量」→ `clashguard:check` 打开 fuck-claude.vercel.app
-  - 「暂停自动修复」→ `clashguard:protect` 保护模式开关
-
-**严格去重**：状态签名不变不弹，连续 3 周期未处理才再提醒，恢复时 Toast 一次。
-
----
-
-## 八、三级应急通道
-
-| 级别 | 操作 | 效果 |
-|---|---|---|
-| 1 软放行 | `-AllowClaude` / 桌面「Claude 软放行.bat」 | 10 分钟内跳过软规则（硬规则仍强制） |
-| 2 紧急总放行 | `-EmergencyAllow` | 10 分钟内所有规则放行 |
-| 3 逃生门 | 双击桌面「Claude紧急启动.bat」 | 彻底停用守护 + 启动 Claude |
-| 恢复保护 | 双击桌面「恢复Clash护卫.bat」/ `-Start` | 重新启用守护 |
-
-### 关键注意：桌面 bat 编码
-
-必须是 **UTF-8 无 BOM + CRLF + 首行 `chcp 65001 >nul`**。本机已开 Windows「UTF-8 Beta」（ACP/OEM=65001），旧 GBK+LF 会被 cmd 拆词（`powershell`→`wershell`）导致双击无效。
-
-### 彻底卸载
+### 2. 先做只读报告
 
 ```powershell
-Unregister-ScheduledTask -TaskName 'PersonalContext-ClashGuard-Watch','PersonalContext-ClashGuard' -Confirm:$false
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\clash_guard.ps1 -Report
 ```
 
----
+该命令不会修改代理/TUN 或注册任务，但会访问配置中的 IP 检测端点并更新本地日志。重点看 `PASS / FAIL / UNKNOWN`，不要只看最后一行。
 
-## 九、计划任务配置
-
-| 任务 | 触发器 | 操作 |
-|---|---|---|
-| `PersonalContext-ClashGuard` | 每 10 分钟 | `wscript.exe run_hidden.vbs "powershell -NoProfile -ExecutionPolicy Bypass -File clash_guard.ps1 -Run"` |
-| `PersonalContext-ClashGuard-Watch` | 登录时（AtLogOn） | `wscript.exe run_hidden.vbs "powershell -NoProfile -ExecutionPolicy Bypass -File clash_guard.ps1 -Watch"` |
-
-**为什么用 `run_hidden.vbs`**：`powershell -File` 直接经 `schtasks` 启动会闪一个黑色控制台窗口干扰用户。`wscript run_hidden.vbs "command"` 用 `WScript.Shell.Run cmd, 0, False` 完全隐藏启动。
-
----
-
-## 十、运行时路径硬编码
-
-脚本中默认路径（从 `clash_guard_config.json` 同级目录推断）：
-
-```
-logs/clash_guard.log
-logs/clash_guard_state.json    # 含 gateCache IP 质量缓存
-logs/clash_guard_protect.flag  # 保护模式标记
-```
-
-迁移到新机器时：脚本和配置放同一目录即可，自动按脚本所在目录定位日志目录。
-
----
-
-## 十一、配置文件字段
-
-```jsonc
-{
-  "ipEndpoints": [ /* 7 个 IP 检测端点 */ ],
-  "httpTimeoutSec": 12,           // HTTP 请求超时
-  "escalateAfterCycles": 3,        // 多少周期未处理升级提醒
-  "fraudScoreMax": 50,             // 欺诈分阈值
-  "claudeScoreMax": 50,            // Claude 风险分阈值
-  "allowGraceMinutes": 10,         // 放行持续时间
-  "cacheFreshMinutes": 30,         // gateCache 新鲜度
-  "reachableHosts": [ "api.anthropic.com:443", "claude.ai:443" ],  // TCP 可达目标
-  "autoFix": true,                 // 自动修复开关
-  "autoFixCooldownMin": 10,        // 自动修复冷却
-  "autoStartClash": false,         // Clash 没开时是否自动拉起
-  "apiPorts": [ 9097, 9090 ],      // Clash 内核 API 端口（自动探测）
-  "apiSecret": "",                 // Clash API secret（留空自动读 clash-verge.yaml）
-  "recommendedIpSite": { ... },    // Toast 里推荐的 IP 质量检测站
-  "manualCheckSites": [ ... ]      // 手动泄露检测站点（Toast 按钮一键打开）
-}
-```
-
----
-
-## 十二、关键技术点
-
-| 技术点 | 实现方式 |
-|---|---|
-| Clash 进程检测 | `Get-Process clash-verge, clash-verge-service, verge-mihomo` |
-| TUN 网卡状态 | `Get-NetAdapter` 匹配 Meta Tunnel/Wintun，Status=Up |
-| 系统代理读取 | 注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ProxyEnable` |
-| IPv6 泄露检测 | `Get-NetIPAddress -AddressFamily IPv6` 过滤物理网卡 |
-| TCP 直连检测 | `Test-NetConnection`（3 秒超时，两轮重试） |
-| Clash 内核 API | `Invoke-RestMethod` PATCH 9097 端口，secret 从 `clash-verge.yaml` 正则提取 |
-| Claude 启动监听 | `Register-CimIndicationEvent -Query "SELECT * FROM Win32_ProcessStartTrace WHERE ProcessName='Claude.exe'"`（事件驱动，非轮询） |
-| 单实例互斥 | `New-Object System.Threading.Mutex($false, 'Global\ClashGuardFixMutex')` |
-| WinINET 刷新 | `wininet.dll InternetSetOption` 广播刷新让 Chrome 感知代理变化 |
-| Toast 通知 | Windows Runtime `ToastNotificationManager`（内嵌 PowerShell，CREATE_NO_WINDOW 防闪窗） |
-| 静默启动 | `wscript run_hidden.vbs "command"` 或 `powershell -WindowStyle Hidden` |
-| 并发安全 | Watcher 单实例 Mutex + 修复流程全局 Mutex + 状态文件原子写 |
-
----
-
-## 十三、边界与坑
-
-1. **只碰本地系统代理**（127.0.0.1），外部代理绝不碰——不与用户手动配置打架
-2. **TUN 开启时 IP 检测走代理出口**——测的就是 AI 服务看到的那个 IP
-3. `ensure_system_proxy.ps1`（旧脚本，确保代理开启）与本程序目标相反，已无计划任务挂载，勿启用
-4. API 开 TUN 是内核级，Clash 界面开关可能仍显示关——重启 Clash 后若复发请在界面手动打开
-5. Toast 协议处理器 `clashguard:` 注册在 `HKCU\Software\Classes\`，首次安装需确认注册成功
-6. V1 备份在 `scripts\backup\clash_guard_v1_20261015.ps1`，出问题可回滚
-
----
-
-## 十四、迁移到新机器
+### 3. 安装任务
 
 ```powershell
-# 1. 确认 Clash Verge 已安装并配置好（TUN 模式）
-# 2. 把本目录下所有文件放到一个固定目录（如 D:\Tools\clash_guard\）
-# 3. 确认 clash-verge.yaml 里的 mixed-port 和 secret（脚本会自动探测）
-# 4. 注册两个计划任务（XML 方式最稳）
-# 5. 测试：
-powershell -File clash_guard.ps1 -TestToast      # Toast 通道
-powershell -File clash_guard.ps1 -Report         # 出口环境状态
-powershell -File clash_guard.ps1 -Run            # 巡检一次（自动修复）
-# 6. 打开 Claude.exe 测试门控
-# 7. 制造违规（手动开系统代理），验证自动修复链路
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
+
+安装脚本注册两个当前用户计划任务：
+
+- `ClashGuard-Watch`：登录后启动进程创建事件监控。
+- `ClashGuard-Inspect`：每 10 分钟巡检并按配置尝试自动修复。
+
+如果检测到旧任务 `PersonalContext-ClashGuard*`，安装程序会询问是否停用旧任务，以避免新旧守护重复拦截。确认后只停止/禁用旧任务，不会立即删除，方便回滚；如果拒绝或无法确认，安装会中止，不会冒险叠加两套守护。
+
+### 4. 测试通知按钮
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\clash_guard.ps1 -TestToast
+```
+
+确认通知出现后，逐一测试按钮。特别留意：一键修复会尝试修改本地网络设置，不要在不了解当前代理用途时点击。
+
+### 5. 推荐启动方式
+
+如果希望在启动 Claude **之前**先进行一次门控检查，使用受控启动命令：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\clash_guard.ps1 -Launch
+```
+
+`-Launch` 会先检查环境，通过后先尝试 Claude Store 应用，再尝试 Windows App Paths 与常见 Win32 安装目录中的 `Claude.exe`。如果仍无法定位你的安装方式，它会报告未找到应用；此时请从开始菜单手动启动，并按下面的限制说明理解 Watch 的能力。
+
+## 常用命令
+
+| 命令 | 用途 | 会自动改网吗 |
+|---|---|---:|
+| `-Report` | 生成当前状态报告 | 否 |
+| 不带参数 | 执行一次巡检 | 可能，取决于 `autoFix` |
+| `-Watch` | 前台运行启动事件监控 | 否 |
+| `-Launch` | 检查后尝试启动 Claude | 否（但会启动应用） |
+| `-AllowClaude` | 10 分钟内跳过 IP 质量软规则 | 否 |
+| `-EmergencyAllow` | 10 分钟内跳过全部门控规则 | 否 |
+| `-EmergencyLaunch` | 紧急放行并尝试启动 Claude，Watch 保持运行 | 否 |
+| `-Protect` | 切换网络保护模式，暂停自动修复 | 否 |
+| `-Stop` / `-Start` | 停止/恢复 Watch 任务 | 否 |
+| `-TestToast` | 测试通知与按钮 | 否（按钮本身另论） |
+
+紧急放行标志在 `logs` 下，超过 10 分钟自动过期。结束排障后，建议重新运行 `-Report` 确认环境状态。
+
+## 检查判定
+
+- **PASS**：该检查有足够有效信号，未触发配置阈值。
+- **FAIL**：检测到明确违例，例如代理开关仍开、IPv6 默认路由指向物理网卡、或第三方风险信号超过阈值。
+- **UNKNOWN**：接口失败、有效信号不足或路由证据不完整。默认 IP 质量策略是 fail-open：不会仅因 IP 端点全挂而永久锁住应用；但报告会显示 UNKNOWN，不能把它解读成安全通过。
+
+### 硬性门控检查
+
+1. 检测到 Clash/Mihomo 相关进程。
+2. 检测到符合配置匹配式的已启动 TUN 网卡。
+3. IPv4 默认/分流路由的有效最低 metric 路由指向 TUN；如果路由证据不完整或同优先级路线包含非 TUN，则阻断。
+4. Windows 系统代理关闭；按默认配置，PAC URL 或 WPAD 自动发现开启也会阻断，但脚本不会自动清除它们。
+5. 若物理网卡存在公网全局 IPv6 地址，则检查活动 IPv6 默认/分流路由；物理网卡仍承载相应路由，或路由证据不完整时阻断。
+6. 能建立到配置中的 Claude 服务域名 TCP 443 连接。
+
+TCP 可达只说明连接能够建立，不代表 Claude 账号可用、地区符合服务条款、出口 IP 一定是住宅 IP，也不代表已获得服务商认可。
+
+**重要限制：** Windows 路由检查只能说明系统路由把 IPv4/IPv6 流量送入 TUN，不能证明 Mihomo 对每个检测域名最终选择了代理节点；Clash 规则仍可能对某个域名使用 `DIRECT`。第三方 IP 查询站点会看到它们实际收到请求时的出口地址。若你要验证是否使用预期节点，建议在 `expectedIPv4` 中配置已知的预期 IPv4，并手动确认 Clash 对相关域名的规则；留空时，本工具只能报告观测到的 IPv4 与风险信号，不能证明出口符合你的预期。请只向你信任的第三方服务发送 IP 查询。
+
+## 配置
+
+编辑同目录的 `clash_guard_config.json`：首次安装时 `autoFix` 默认是 `false`，建议先按回归测试计划验证状态判断；确认本机环境与预期一致后，再把它改为 `true` 启用有边界的自动修复。
+
+- `autoFix`：巡检发现可修复的硬性违规时是否尝试自动修复。新安装默认 `false`，先完成回归测试；确认你的 Clash/TUN/代理环境后，再手动改为 `true` 启用周期自动修复。通知里的“一键修复”属于明确点击触发的手动操作。
+- `blockPacProxy` / `blockAutoDetectProxy`：是否将 PAC/WPAD 配置视为系统代理违规。默认均为 `true`。
+- `tunAdapterPattern`：用于识别 TUN 网卡的正则表达式。不同 Clash/Mihomo 版本可能需要调整。
+- `expectedIPv4`：可选的期望 IPv4 出口。留空表示不强制固定出口；配置后，如果有效 IPv4 来源均未返回该地址会标记风险不符；没有有效 IPv4 结果或来源不一致时标记 UNKNOWN。
+- `clash_guard_config.local.json`：可选的本机覆盖配置，优先级高于主配置；适合放 `apiSecret`、`expectedIPv4` 等机器特有值。该文件已加入 `.gitignore`。覆盖数组（如 `ipEndpoints`）会替换整个数组；主配置和本地配置都会经过相同校验。
+- `fraudScoreMax` / `claudeScoreMax`：第三方接口返回的风险参考阈值，分数定义由数据提供方决定。
+- `apiSecret`：Clash 内核 API secret。留空时脚本尝试从 Clash Verge Rev 配置文件读取。不要把真实 secret 上传到公开仓库。
+- `ipEndpoints`：必须为 HTTPS。错误 JSON、服务超时、字段缺失会导致该端点为 UNKNOWN。
+
+不要为了“通过检查”而随意关闭代理、删除 PAC 或改路由；先判断当前网络方案和这些设置的作用。
+
+## 本地日志与状态
+
+- `logs/clash_guard.log`：日志，超过 2 MB 时保留一份 `.1`。
+- `logs/clash_guard_state.json`：最近巡检状态与启动门控使用的质量缓存。
+- `logs/clash_guard_fix.cooldown`：自动修复冷却时间。
+- `logs/clash_guard_allow.flag` / `clash_guard_emergency.flag`：临时放行时间戳。
+
+日志会记录外显出口 IP 和检测状态。分享日志前请检查是否含有不想公开的 IP、网络信息或本机路径。
+
+## 测试方式
+
+1. 执行 `python -m unittest discover -s tests -v`：检查配置、发布文件和关键代码回归约束（不需要第三方 Python 包）。
+2. 执行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Invoke-WindowsSmokeTests.ps1`：验证本机 PowerShell 版本、JSON 配置、协议处理器文件和只读报告入口。
+3. 执行 `-Report`，确认 TUN、代理、IPv6 路由、出口 IP 和 TCP 结果符合预期。
+4. 执行 `-TestToast`，测试所有通知按钮，包括目录带空格时。
+5. 在备份当前配置后，按 `docs/REGRESSION_TEST_PLAN.md` 的故障注入步骤测试代理、TUN、IPv6、接口超时、紧急放行与恢复。
+6. 测完后重新执行 `-Report`，并查看日志确认没有仍在运行的旧 Watch 进程。
+
+静态测试通过不等于已在你的具体 Clash Verge、节点、Windows 版本和 Store Claude 安装上完成实机验证。该压缩包由开发容器生成，不能代替 Windows PowerShell 5.1 实测。
+
+## 安全说明
+
+- 此项目是个人辅助防错工具，不保证匿名、不保证绕过任何服务商限制，也不提供封号规避承诺。
+- 自动修复会通过本机 Clash API 尝试启用 TUN，并且只在确认 `ProxyServer` 全部为本机地址、TUN 已就绪、HTTPS 验证成功时关闭系统代理。对外部代理、PAC 和 WPAD 不自动更改。
+- Watch 默认监听 `Claude.exe`，通过进程创建事件工作，属于**进程创建后的响应式终止**，不是 Windows 内核级的启动前封锁。任何事件守护都存在启动竞态；希望严格控制启动入口时应使用 `-Launch` 并把快捷方式指向受控启动器，或采用 Windows 应用控制策略。
+- “住宅 IP”“Claude 风险分”等指标来自第三方服务，可能过期、变化、错误或不可用。未知状态与通过状态分开显示。
+- Toast 按钮协议仅接受固定动作白名单，不接受任意命令。
+
+## 卸载
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
+```
+
+卸载脚本只移除本版本注册的计划任务，并仅在协议命令确实指向当前目录时删除 `clashguard:` 注册。代码、配置和日志会保留，便于检查和回滚。
